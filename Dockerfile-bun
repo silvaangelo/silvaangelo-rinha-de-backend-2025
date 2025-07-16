@@ -1,0 +1,25 @@
+FROM oven/bun:1.1.13-alpine as base
+
+FROM base as build
+
+RUN set -x \
+  && bun add -g pnpm
+
+WORKDIR /src
+
+COPY . /src/
+
+RUN set -x \
+  && bun install \
+  && bun run build
+
+FROM base as runner
+
+WORKDIR /api
+
+COPY --from=build --link --chown=1001:1001 /src/dist /api
+
+EXPOSE 3000
+EXPOSE 9229
+
+ENV HOSTNAME=localhost
