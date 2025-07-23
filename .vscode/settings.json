@@ -1,0 +1,31 @@
+{
+  "editor.codeActionsOnSave": {
+    "source.fixAll.eslint": "explicit"
+  },
+  "eslint.validate": [
+    "javascript",
+    "typescript",
+  ],
+  "eslint.format.enable": true,
+  "editor.formatOnSave": true,
+  "editor.tabSize": 2,
+  "search.exclude": {
+    "**/node_modules": true,
+    "**/bower_components": true,
+    "**/*.code-search": true,
+    "**/dist/**": true
+  },
+  "files.exclude": {
+    "**/.DS_Store": true,
+    "**/.gradle/**": true,
+    "**/.idea/**": true,
+    "**/.svn": true,
+    "**/.tmp": true,
+    "**/Pods/**": true,
+    "**/bin/**": true,
+    "**/obj/**": true,
+    "**/vendor/**": true,
+    ".docker-data": true,
+    "tsconfig.tsbuildinfo": true
+  }
+}

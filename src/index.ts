@@ -1,95 +1,54 @@
+import { insertScore } from "./bSearch";
+import { buildPaymentProcessor, PaymentProcessor, paymentProcessors } from "./processor";
 import {
-    DEFAULT_HEALTH,
-    setIntervalDefaultHealth,
-    setIntervalDefaultHealthFromRedis,
-} from "./processor/default";
-import {
-    FALLBACK_HEALTH,
-    setIntervalFallbackHealth,
-    setIntervalFallbackHealthFromRedis,
-} from "./processor/fallback";
-import { payment } from "./payment";
-import {
-    getPaymentsSummaryFromRedis,
     getRedis,
-    insertPaymentToRedis,
+    getSummary,
     popPaymentJob,
-    pushPaymentJob,
-    pushStringPaymentJob,
+    REDIS_PAYMENTS_QUEUE,
+    RedisInstance
 } from "./redis";
 
-let listening = false;
+export let WORKER_STATE = false;
+export let PUBLISHED_STATE = false;
 
-const startJobListener = async () => {
-    if (!listening) {
-        listening = true;
-        listenToJobs();
-        listenToJobs();
-        listenToJobs();
-    }
-};
+const startWorker = async (processor: PaymentProcessor, pubRedis: RedisInstance) => {
+    const listenRedis = await getRedis();
 
-const listenToJobs = async () => {
     while (true) {
-        const job = await popPaymentJob();
-        const bothFailing = FALLBACK_HEALTH?.failing && DEFAULT_HEALTH?.failing;
-        if (!job) continue;
+        const job = await popPaymentJob(listenRedis);
 
-        if (bothFailing) {
-            await pushStringPaymentJob(job.job);
-
-            await new Promise((resolve) => {
-                let timeout: any = null;
-                let interval: any = null;
-
-                timeout = setTimeout(() => {
-                    if (interval) clearInterval(interval);
-                    resolve(true);
-                }, 50);
-
-                interval = setInterval(() => {
-                    const defaultIsActive = DEFAULT_HEALTH &&
-                        !DEFAULT_HEALTH.failing;
-                    const fallbackIsActive = FALLBACK_HEALTH &&
-                        !FALLBACK_HEALTH.failing;
-
-                    if (defaultIsActive || fallbackIsActive) {
-                        if (timeout) clearTimeout(timeout);
-                        if (interval) clearInterval(interval);
-                        resolve(true);
-                    }
-                }, 1);
-            });
-
+        if (!job) {
             continue;
-        }
+        };
 
-        const { correlationId, amount } = job;
+        const correlationId = job;
 
-        try {
-            const requestedAt = new Date();
-            const result = await payment(correlationId, amount, requestedAt);
+        const result = await processor.pay({
+            correlationId,
+            amount: 19.90
+        });
 
-            if (result.result) {
-                await insertPaymentToRedis(
-                    result.processor,
-                    requestedAt,
-                    correlationId,
-                    amount,
-                );
-            } else {
-                await pushStringPaymentJob(job.job);
-            }
-        } catch (error) {
-            console.error("Error processing job:", error);
-            await pushStringPaymentJob(job.job);
+        if (result.ok) {
+            pubRedis.publish(result.processor.paidChannel, String(result.requestedAt / 1000));
+        } else {
+            pubRedis.rPush(REDIS_PAYMENTS_QUEUE, correlationId);
         }
     }
-};
+}
 
-const JSONCONTENT_TYPE = { "Content-Type": "application/json" };
+const startWorkers = async (pubRedis: RedisInstance, subRedis: RedisInstance) => {
+    if (WORKER_STATE) {
+        return;
+    }
+    WORKER_STATE = true;
+    const processor = await buildPaymentProcessor(pubRedis, subRedis);
+    for (let i = 0; i <= 10; i++) {
+        startWorker(processor, pubRedis);
+    }
+}
 
-// Helpers
+export const JSONCONTENT_TYPE = { "Content-Type": "application/json" };
+
 const sendText = (status: number): Response => new Response(null, { status });
 
 const send = (status: number, data: any): Response =>
@@ -98,78 +57,62 @@ const send = (status: number, data: any): Response =>
         headers: JSONCONTENT_TYPE,
     });
 
-const server = Bun.serve({
-    port: 3000,
-    async fetch(req) {
-        const { method, url } = req;
+const extractCorrelationId = (json: string) => {
+    const start = json.indexOf('"correlationId":"');
+    if (start === -1) return '0';
+    const from = start + 17;
+    const to = json.indexOf('"', from);
+    return json.slice(from, to);
+}
 
-        if (method === "POST" && url.includes("/payments")) {
-            try {
-                const body = await req.json();
-                const { correlationId, amount } = body;
+const startServer = async (pubRedis: RedisInstance) => {
+    Bun.serve({
+        port: 3000,
+        async fetch(req) {
+            const { method, url } = req;
 
-                pushPaymentJob(correlationId, amount);
-                if (!listening) startJobListener();
-
+            if (method === "POST" && url.includes("/payments")) {
+                const correlationId = extractCorrelationId(await req.text());
+                pubRedis.rPush(REDIS_PAYMENTS_QUEUE, correlationId);
+                if (!WORKER_STATE && !PUBLISHED_STATE) {
+                    PUBLISHED_STATE = true;
+                    pubRedis.publish('workers:start', 'workers:start');
+                }
                 return sendText(202);
-            } catch (err) {
-                console.error("Error processing payment:", err);
-                return sendText(429);
             }
+
+            const parsed = new URL(url);
+            const pathname = parsed.pathname;
+
+            if (method === "GET" && pathname === "/payments-summary") {
+                const from = parsed.searchParams.get("from");
+                const to = parsed.searchParams.get("to");
+
+                const fromScore = from ? new Date(from).getTime() / 1000 : undefined;
+                const toScore = to ? new Date(to).getTime() / 1000 : undefined
+
+                const summary = getSummary(
+                    fromScore,
+                    toScore,
+                );
+
+                return send(200, summary);
+            }
+
+            return send(404, { error: "Not Found" });
         }
-
-        const parsed = new URL(url);
-        const pathname = parsed.pathname;
-
-        if (method === "GET" && pathname === "/payments-summary") {
-            const from = parsed.searchParams.get("from");
-            const to = parsed.searchParams.get("to");
-
-            const summary = await getPaymentsSummaryFromRedis(
-                from ? new Date(from) : undefined,
-                to ? new Date(to) : undefined,
-            );
-
-            return send(200, summary);
-        }
-
-        return send(404, { error: "Not Found" });
-    },
-});
-
-const start = async () => {
-    try {
-        console.log("Starting server...");
-
-        await Promise.all([
-            getRedis(),
-            setIntervalDefaultHealth(),
-            setIntervalFallbackHealth(),
-            setIntervalDefaultHealthFromRedis(),
-            setIntervalFallbackHealthFromRedis(),
-        ]);
-
-        console.log("Server is running on port 3000");
-    } catch (err) {
-        console.error("Error starting server:", err);
-        process.exit(1);
-    }
+    })
 };
 
-start();
+(async () => {
+    const subRedis = await getRedis();
+    const pubRedis = await getRedis();
 
-// Graceful shutdown
-process.on("SIGTERM", () => {
-    console.log("SIGTERM received, shutting down gracefully...");
-    process.exit(0);
-});
+    subRedis.subscribe('workers:start', () => startWorkers(pubRedis, subRedis));
+    subRedis.subscribe(paymentProcessors.default.paidChannel, (score) => insertScore(Number(score), paymentProcessors.default.summary));
+    subRedis.subscribe(paymentProcessors.fallback.paidChannel, (score) => insertScore(Number(score), paymentProcessors.fallback.summary));
 
-process.on("SIGINT", () => {
-    console.log("SIGINT received, shutting down gracefully...");
-    process.exit(0);
-});
+    startServer(pubRedis);
 
-process.on("uncaughtException", (err) => {
-    console.error("Uncaught Exception:", err);
-    process.exit(1);
-});
+    console.log("Server is running on port 3000.");
+})();

@@ -1,3 +1,3 @@
 # Rinha de backend
 
-Todo: write docs
+Implementação da rinha de backend 2025 com Bun + Redis
