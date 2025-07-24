@@ -80,7 +80,7 @@ export const buildPaymentProcessor = async (pubRedis: RedisInstance, subRedis: R
     setInterval(() => checkHealth(paymentProcessors.default), 5000);
     setInterval(() => checkHealth(paymentProcessors.fallback), 5000);
 
-    const decideProcessor = (attempt = 0) => {
+    const decideProcessor = (attempt = 0, attempts = 30) => {
         if (paymentProcessors.default.failing && paymentProcessors.fallback.failing) {
             return paymentProcessors.default;
         }
@@ -89,18 +89,18 @@ export const buildPaymentProcessor = async (pubRedis: RedisInstance, subRedis: R
             return paymentProcessors.default;
         }
 
-        if (attempt < 25) {
+        if (attempt < (attempts / 1.2)) {
             return paymentProcessors.default;
         }
 
         return paymentProcessors.fallback;
     }
 
-    const pay = async (payment: Payment, attempt = 0) => {
+    const pay = async (payment: Payment, attempt = 0, attempts = 0) => {
         const requestedAt = new Date();
         const atTime = requestedAt.getTime();
 
-        const usedProcessor = decideProcessor(attempt);
+        const usedProcessor = decideProcessor(attempt, attempts);
 
         const { ok } = await fetch(usedProcessor.paymentUrl, {
             method: "POST",
@@ -119,18 +119,20 @@ export const buildPaymentProcessor = async (pubRedis: RedisInstance, subRedis: R
         };
     };
 
+    const payUntil = async (payment: Payment, attempts: 30) => {
+        for (let i = 0; i <= attempts; i++) {
+            const result = await pay(payment, i, attempts);
+
+            if (result.ok || i >= attempts) {
+                return result;
+            };
+        }
+
+        return pay(payment, 0, attempts);
+    };
+
     return {
-        pay: async (payment: Payment) => {
-            for (let i = 0; i <= 30; i++) {
-                const result = await pay(payment, i);
-
-                if (result.ok || i >= 30) {
-                    return result;
-                };
-            }
-
-            return pay(payment, 0);
-        },
+        pay: async (payment: Payment) => payUntil(payment, 30),
         checkHealth
     }
 }

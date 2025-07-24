@@ -1,4 +1,4 @@
-export const insertScore = (score: number, scores: number[]) => {
+export const insertPayment = (score: number, scores: number[]) => {
   if (scores.length === 0 || scores[scores.length - 1] <= score) {
     scores.push(score);
   } else {
