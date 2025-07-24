@@ -1,6 +1,6 @@
-import { JSONCONTENT_TYPE, WORKER_STATE } from ".";
+import { JSONCONTENT_TYPE } from ".";
 import { PROCESSOR_DEFAULT_HEALTH_URL, PROCESSOR_DEFAULT_PAYMENT_URL, PROCESSOR_FALLBACK_HEALTH_URL, PROCESSOR_FALLBACK_PAYMENT_URL } from "./env";
-import { getRedis, RedisInstance } from "./redis";
+import { RedisInstance } from "./redis";
 
 export type PaymentProcessorState = {
     failing: boolean;
@@ -72,18 +72,13 @@ export const buildPaymentProcessor = async (pubRedis: RedisInstance, subRedis: R
         processor.minResponseTime = minResponseTime;
     });
 
-    Promise.all([
-        checkHealth(paymentProcessors.default),
-        checkHealth(paymentProcessors.fallback),
-    ]);
+    checkHealth(paymentProcessors.default);
+    checkHealth(paymentProcessors.fallback);
+    subscribeToRedisHealth(paymentProcessors.default);
+    subscribeToRedisHealth(paymentProcessors.fallback);
 
-    await Promise.all([
-        subscribeToRedisHealth(paymentProcessors.default),
-        subscribeToRedisHealth(paymentProcessors.fallback)
-    ]);
-
-    setInterval(() => WORKER_STATE && checkHealth(paymentProcessors.default), 5000);
-    setInterval(() => WORKER_STATE && checkHealth(paymentProcessors.fallback), 5000);
+    setInterval(() => checkHealth(paymentProcessors.default), 5000);
+    setInterval(() => checkHealth(paymentProcessors.fallback), 5000);
 
     const decideProcessor = (attempt = 0) => {
         if (paymentProcessors.default.failing && paymentProcessors.fallback.failing) {
@@ -105,9 +100,9 @@ export const buildPaymentProcessor = async (pubRedis: RedisInstance, subRedis: R
         const requestedAt = new Date();
         const atTime = requestedAt.getTime();
 
-        const processor = decideProcessor(attempt);
+        const usedProcessor = decideProcessor(attempt);
 
-        const { ok } = await fetch(processor.paymentUrl, {
+        const { ok } = await fetch(usedProcessor.paymentUrl, {
             method: "POST",
             headers: JSONCONTENT_TYPE,
             body: JSON.stringify({
@@ -119,7 +114,7 @@ export const buildPaymentProcessor = async (pubRedis: RedisInstance, subRedis: R
 
         return {
             ok,
-            processor,
+            usedProcessor,
             requestedAt: atTime
         };
     };

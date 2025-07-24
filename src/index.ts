@@ -29,21 +29,10 @@ const startWorker = async (processor: PaymentProcessor, pubRedis: RedisInstance)
         });
 
         if (result.ok) {
-            pubRedis.publish(result.processor.paidChannel, String(result.requestedAt / 1000));
+            pubRedis.publish(result.usedProcessor.paidChannel, String(result.requestedAt));
         } else {
             pubRedis.rPush(REDIS_PAYMENTS_QUEUE, correlationId);
         }
-    }
-}
-
-const startWorkers = async (pubRedis: RedisInstance, subRedis: RedisInstance) => {
-    if (WORKER_STATE) {
-        return;
-    }
-    WORKER_STATE = true;
-    const processor = await buildPaymentProcessor(pubRedis, subRedis);
-    for (let i = 0; i <= 10; i++) {
-        startWorker(processor, pubRedis);
     }
 }
 
@@ -74,10 +63,6 @@ const startServer = async (pubRedis: RedisInstance) => {
             if (method === "POST" && url.includes("/payments")) {
                 const correlationId = extractCorrelationId(await req.text());
                 pubRedis.rPush(REDIS_PAYMENTS_QUEUE, correlationId);
-                if (!WORKER_STATE && !PUBLISHED_STATE) {
-                    PUBLISHED_STATE = true;
-                    pubRedis.publish('workers:start', 'workers:start');
-                }
                 return sendText(202);
             }
 
@@ -88,8 +73,8 @@ const startServer = async (pubRedis: RedisInstance) => {
                 const from = parsed.searchParams.get("from");
                 const to = parsed.searchParams.get("to");
 
-                const fromScore = from ? new Date(from).getTime() / 1000 : undefined;
-                const toScore = to ? new Date(to).getTime() / 1000 : undefined
+                const fromScore = from ? new Date(from).getTime() : undefined;
+                const toScore = to ? new Date(to).getTime() : undefined
 
                 const summary = getSummary(
                     fromScore,
@@ -99,20 +84,33 @@ const startServer = async (pubRedis: RedisInstance) => {
                 return send(200, summary);
             }
 
+            if (method === "POST" && pathname === "/admin/purge-payments") {
+                paymentProcessors.default.summary = [];
+                paymentProcessors.fallback.summary = [];
+
+                return send(200, {
+                    message: "All payments purged."
+                });
+            }
+
             return send(404, { error: "Not Found" });
         }
     })
 };
 
 (async () => {
-    const subRedis = await getRedis();
-    const pubRedis = await getRedis();
+    const [subRedis, pubRedis] = await Promise.all([
+        getRedis(),
+        getRedis()
+    ]);
 
-    subRedis.subscribe('workers:start', () => startWorkers(pubRedis, subRedis));
     subRedis.subscribe(paymentProcessors.default.paidChannel, (score) => insertScore(Number(score), paymentProcessors.default.summary));
     subRedis.subscribe(paymentProcessors.fallback.paidChannel, (score) => insertScore(Number(score), paymentProcessors.fallback.summary));
 
-    startServer(pubRedis);
+    const processor = await buildPaymentProcessor(pubRedis, subRedis);
+    for (let i = 0; i <= 10; i++) {
+        startWorker(processor, pubRedis);
+    }
 
-    console.log("Server is running on port 3000.");
+    startServer(pubRedis);
 })();

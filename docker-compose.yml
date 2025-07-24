@@ -8,8 +8,6 @@ services:
       --appendonly no
       --maxclients 20000
       --hz 1000
-    tmpfs:
-      - /data
     networks:
       - rinha-net
       - payment-processor

@@ -1,4 +1,3 @@
-// Insert keeping sorted order (binary insert)
 export const insertScore = (score: number, scores: number[]) => {
   if (scores.length === 0 || scores[scores.length - 1] <= score) {
     scores.push(score);
@@ -8,7 +7,6 @@ export const insertScore = (score: number, scores: number[]) => {
   }
 }
 
-// Binary insert: returns index to insert
 const binaryInsert = (arr: number[], val: number) => {
   let low = 0, high = arr.length;
   while (low < high) {
@@ -19,7 +17,6 @@ const binaryInsert = (arr: number[], val: number) => {
   return low;
 }
 
-// Range count: scores >= min && <= max
 export const countInRange = (min: number, max: number, scores: number[]) => {
   const lo = lowerBound(scores, min);
   const hi = upperBound(scores, max);
