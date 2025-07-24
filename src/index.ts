@@ -18,6 +18,27 @@ const send = (status: number, data: any): Response =>
         headers: JSONCONTENT_TYPE,
     });
 
+function extractCorrelationIdFromBuffer(buf: Uint8Array): string {
+    const target = new TextEncoder().encode('"correlationId":"');
+    const start = indexOfBytes(buf, target);
+    if (start === -1) return '0';
+
+    const from = start + target.length;
+    const to = buf.indexOf(0x22, from); // 0x22 = ASCII for `"`
+
+    return new TextDecoder().decode(buf.subarray(from, to));
+}
+
+function indexOfBytes(buf: Uint8Array, target: Uint8Array): number {
+    outer: for (let i = 0; i <= buf.length - target.length; i++) {
+        for (let j = 0; j < target.length; j++) {
+            if (buf[i + j] !== target[j]) continue outer;
+        }
+        return i;
+    }
+    return -1;
+}
+
 const extractCorrelationId = (json: string) => {
     const start = json.indexOf('"correlationId":"');
     if (start === -1) return '0';
@@ -32,8 +53,10 @@ const startApi = async (pubRedis: RedisInstance) => Bun.serve({
         const { method, url } = req;
 
         if (method === "POST" && url.includes("/payments")) {
-            const correlationId = extractCorrelationId(await req.text());
+            const buf = await req.arrayBuffer();
+            const correlationId = extractCorrelationIdFromBuffer(new Uint8Array(buf));
             pubRedis.rPush(REDIS_PAYMENTS_QUEUE, correlationId);
+
             return sendText(202);
         }
 
@@ -69,15 +92,19 @@ const startApi = async (pubRedis: RedisInstance) => Bun.serve({
 });
 
 (async () => {
-    const [subRedis, pubRedis] = await Promise.all([getRedis(), getRedis()]);
+    const pubRedis = await getRedis();
 
-    subRedis.subscribe(paymentProcessors.default.paidChannel, requestedAt => insertPayment(Number(requestedAt), paymentProcessors.default.summary));
-    subRedis.subscribe(paymentProcessors.fallback.paidChannel, requestedAt => insertPayment(Number(requestedAt), paymentProcessors.fallback.summary));
+    (async () => {
+        const subRedis = await getRedis();
+        const processor = await buildPaymentProcessor(pubRedis, subRedis);
 
-    const processor = await buildPaymentProcessor(pubRedis, subRedis);
-    for (let i = 0; i <= 10; i++) {
-        startWorker(processor, pubRedis);
-    }
+        subRedis.subscribe(paymentProcessors.default.paidChannel, requestedAt => insertPayment(Number(requestedAt), paymentProcessors.default.summary));
+        subRedis.subscribe(paymentProcessors.fallback.paidChannel, requestedAt => insertPayment(Number(requestedAt), paymentProcessors.fallback.summary));
+
+        for (let i = 0; i <= 10; i++) {
+            startWorker(processor, pubRedis);
+        }
+    })();
 
     startApi(pubRedis);
 })();

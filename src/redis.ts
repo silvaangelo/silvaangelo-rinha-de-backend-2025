@@ -38,17 +38,17 @@ export const getSummary = (
     fromScore?: number,
     toScore?: number
 ) => {
-    const defaultLength = getLength(paymentProcessors.default, fromScore, toScore)
-    const fallbackLength = getLength(paymentProcessors.fallback, fromScore, toScore)
+    const defaultLength = getLength(paymentProcessors.default, fromScore, toScore);
+    const fallbackLength = getLength(paymentProcessors.fallback, fromScore, toScore);
 
     return {
         default: {
             totalRequests: defaultLength,
-            totalAmount: defaultLength * 19.90
+            totalAmount: Number(((defaultLength * 1990) / 100).toFixed(2))
         },
         fallback: {
             totalRequests: fallbackLength,
-            totalAmount: fallbackLength * 19.90
+            totalAmount: Number(((fallbackLength * 1990) / 100).toFixed(2))
         }
     }
 }
