@@ -42,3 +42,15 @@ export const upperBound = (arr: number[], val: number) => {
   }
   return low;
 }
+
+export const getLength = (
+  summary: number[],
+  fromScore?: number,
+  toScore?: number
+) => {
+  if (!fromScore || !toScore) {
+    return summary?.length || 0;
+  }
+
+  return countInRange(fromScore, toScore, summary);
+}

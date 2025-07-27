@@ -1,25 +1,30 @@
-import { PaymentProcessor } from "./processor";
-import { RedisInstance, getRedis, popPaymentJob, REDIS_PAYMENTS_QUEUE } from "./redis";
+import { Processors } from "./constants";
+import { pay } from "./processor";
+import { RedisInstance, getRedis, popPaymentJob, REDIS_PAYMENTS_QUEUE, REDIS_PAID_DEFAULT_CHANNEL, REDIS_PAID_FALLBACK_CHANNEL } from "./redis";
 
-export const startWorker = async (processor: PaymentProcessor, pubRedis: RedisInstance) => {
+export const startWorker = async (pubRedis: RedisInstance, processors: Processors) => {
   const listenRedis = await getRedis();
 
   while (true) {
-    const job = await popPaymentJob(listenRedis);
+    const correlationId = await popPaymentJob(listenRedis);
 
-    if (!job) {
+    if (!correlationId) {
       continue;
     };
 
-    const result = await processor.pay({
-      correlationId: job,
+    const result = await pay({
+      correlationId,
       amount: 19.90
-    });
+    }, 20, processors)
 
     if (result.ok) {
-      pubRedis.publish(result.usedProcessor.paidChannel, String(result.requestedAt));
+      const channel = result.usedProcessor === "default"
+        ? REDIS_PAID_DEFAULT_CHANNEL
+        : REDIS_PAID_FALLBACK_CHANNEL;
+
+      await pubRedis.publish(channel, String(result.requestedAtTime));
     } else {
-      pubRedis.rPush(REDIS_PAYMENTS_QUEUE, job);
+      await pubRedis.lPush(REDIS_PAYMENTS_QUEUE, correlationId);
     }
   }
 }

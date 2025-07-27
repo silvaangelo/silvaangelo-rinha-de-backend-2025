@@ -1,140 +1,91 @@
-import { JSONCONTENT_TYPE } from ".";
-import { PROCESSOR_DEFAULT_HEALTH_URL, PROCESSOR_DEFAULT_PAYMENT_URL, PROCESSOR_FALLBACK_HEALTH_URL, PROCESSOR_FALLBACK_PAYMENT_URL } from "./env";
+import { JSONCONTENT_TYPE, Processors, ProcessorState } from "./constants";
 import { RedisInstance } from "./redis";
 
-export type PaymentProcessorState = {
-    failing: boolean;
-    minResponseTime: number;
-    paymentUrl: string;
-    healthcheckUrl: string;
-    processor: 'default' | 'fallback';
-    paidChannel: string;
-    healthChannel: string;
-    summary: number[];
-};
+export type Processor = 'default' | 'fallback';
 
-export const paymentProcessors = {
-    default: {
-        failing: false,
-        minResponseTime: 350,
-        paymentUrl: PROCESSOR_DEFAULT_PAYMENT_URL,
-        healthcheckUrl: PROCESSOR_DEFAULT_HEALTH_URL,
-        processor: 'default',
-        paidChannel: 'payments:default:index',
-        healthChannel: 'payments:default:health',
-        summary: []
-    } as PaymentProcessorState,
-    fallback: {
-        failing: false,
-        minResponseTime: 350,
-        paymentUrl: PROCESSOR_FALLBACK_PAYMENT_URL,
-        healthcheckUrl: PROCESSOR_FALLBACK_HEALTH_URL,
-        processor: 'fallback',
-        paidChannel: 'payments:fallback:index',
-        healthChannel: 'payments:fallback:health',
-        summary: []
-    } as PaymentProcessorState
-};
-
-export type PaymentProcessorAlternatives = keyof typeof paymentProcessors;
-
-export type Payment = {
+type Payment = {
     correlationId: string;
     amount: number;
 }
 
-export const buildPaymentProcessor = async (pubRedis: RedisInstance, subRedis: RedisInstance) => {
-    const checkHealth = async (processor: PaymentProcessorState) => fetch(processor.healthcheckUrl, {
-        method: 'GET',
-        headers: JSONCONTENT_TYPE
-    }).then(async result => result.ok && result.json().then(async ({
-        failing,
-        minResponseTime
-    }: {
-        failing: boolean;
-        minResponseTime: number;
-    }) => {
-        const value = `${Number(failing)}:${minResponseTime}`;
+export const checkHealth = async (processor: ProcessorState, pubRedis: RedisInstance) => fetch(processor.healthcheckUrl, {
+    method: 'GET',
+    headers: JSONCONTENT_TYPE
+}).then(async result => result.ok && result.json().then(async ({
+    failing,
+    minResponseTime
+}: {
+    failing: boolean;
+    minResponseTime: number;
+}) => {
+    pubRedis.publish(
+        processor.healthChannel,
+        `${Number(failing)}:${minResponseTime}`,
+    );
 
-        pubRedis.publish(
-            processor.healthChannel,
-            value,
-        );
+    processor.failing = failing;
+    processor.minResponseTime = minResponseTime;
+}));
 
-        processor.failing = failing;
-        processor.minResponseTime = minResponseTime;
-    }))
+export const subscribeToRedisHealth = (processor: ProcessorState, subRedis: RedisInstance) => subRedis.subscribe(processor.healthChannel, (message: string) => {
+    const [failing, minResponseTime] = message.split(':');
 
-    const subscribeToRedisHealth = (processor: PaymentProcessorState) => subRedis.subscribe(processor.healthChannel, (message: string) => {
-        const [failing, minResponseTime] = message.split(':').map(Number);
+    processor.failing = failing === '1';
+    processor.minResponseTime = Number(minResponseTime);
+});
 
-        processor.failing = Boolean(failing);
-        processor.minResponseTime = minResponseTime;
-    });
-
-    checkHealth(paymentProcessors.default);
-    checkHealth(paymentProcessors.fallback);
-    subscribeToRedisHealth(paymentProcessors.default);
-    subscribeToRedisHealth(paymentProcessors.fallback);
-
-    setInterval(() => checkHealth(paymentProcessors.default), 5000);
-    setInterval(() => checkHealth(paymentProcessors.fallback), 5000);
-
-    const decideProcessor = (attempt = 0, attempts = 30) => {
-        if (paymentProcessors.default.failing && paymentProcessors.fallback.failing) {
-            return paymentProcessors.default;
-        }
-
-        if (paymentProcessors.default.minResponseTime <= paymentProcessors.fallback.minResponseTime) {
-            return paymentProcessors.default;
-        }
-
-        if (attempt < (attempts / 1.2)) {
-            return paymentProcessors.default;
-        }
-
-        return paymentProcessors.fallback;
+export const decideProcessor = (attempt = 0, attempts = 30, processors: Processors) => {
+    if (processors.default.failing && processors.fallback.failing) {
+        return processors.default;
     }
 
-    const pay = async (payment: Payment, attempt = 0, attempts = 0) => {
-        const requestedAt = new Date();
-        const atTime = requestedAt.getTime();
+    if (processors.default.minResponseTime <= processors.fallback.minResponseTime) {
+        return processors.default;
+    }
 
-        const usedProcessor = decideProcessor(attempt, attempts);
+    if (attempt < attempts - 1) {
+        return processors.default;
+    }
 
-        const { ok } = await fetch(usedProcessor.paymentUrl, {
-            method: "POST",
-            headers: JSONCONTENT_TYPE,
-            body: JSON.stringify({
-                correlationId: payment.correlationId,
-                amount: payment.amount,
-                requestedAt: requestedAt.toISOString(),
-            }),
-        });
+    return processors.fallback;
+}
+
+export const tryToPay = async (payment: Payment, attempt = 0, attempts = 0, requestedAtISO: string, requestedAtTime: number, processors: Processors) => {
+    const usedProcessor = decideProcessor(attempt, attempts, processors);
+
+    return fetch(usedProcessor.paymentUrl, {
+        method: "POST",
+        headers: JSONCONTENT_TYPE,
+        body: JSON.stringify({
+            correlationId: payment.correlationId,
+            amount: payment.amount,
+            requestedAt: requestedAtISO,
+        }),
+    }).then(result => {
+        const { ok } = result;
 
         return {
             ok,
-            usedProcessor,
-            requestedAt: atTime
+            usedProcessor: usedProcessor.processor,
+            requestedAtTime,
         };
-    };
+    });
+};
 
-    const payUntil = async (payment: Payment, attempts: 30) => {
-        for (let i = 0; i <= attempts; i++) {
-            const result = await pay(payment, i, attempts);
+export const pay = async (payment: Payment, attempts = 20, processors: Processors) => {
+    const requestedAt = new Date();
+    const requestedAtISO = requestedAt.toISOString();
+    const requestedAtTime = requestedAt.getTime();
 
-            if (result.ok || i >= attempts) {
-                return result;
-            };
-        }
+    for (let i = 0; i <= attempts; i++) {
+        const result = await tryToPay(payment, i, attempts, requestedAtISO, requestedAtTime, processors);
 
-        return pay(payment, 0, attempts);
-    };
+        if (result.ok || i >= attempts) {
+            return result;
+        };
 
-    return {
-        pay: async (payment: Payment) => payUntil(payment, 30),
-        checkHealth
+        await new Promise(resolve => setTimeout(resolve, 200));
     }
-}
 
-export type PaymentProcessor = Awaited<ReturnType<typeof buildPaymentProcessor>>;
+    return tryToPay(payment, attempts, attempts, requestedAtISO, requestedAtTime, processors);
+};

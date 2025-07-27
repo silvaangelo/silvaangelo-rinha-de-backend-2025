@@ -12,3 +12,20 @@ export const PROCESSOR_DEFAULT_HEALTH_URL =
     `${PROCESSOR_DEFAULT_URL}/payments/service-health`;
 export const PROCESSOR_FALLBACK_HEALTH_URL =
     `${PROCESSOR_FALLBACK_URL}/payments/service-health`;
+
+export const JSONCONTENT_TYPE = { "Content-Type": "application/json" };
+
+export type Processors = {
+    default: ProcessorState;
+    fallback: ProcessorState;
+}
+
+export type ProcessorState = {
+    failing: boolean;
+    minResponseTime: number;
+    paymentUrl: string;
+    healthcheckUrl: string;
+    processor: 'default' | 'fallback';
+    healthChannel: string;
+    summary: number[];
+};
