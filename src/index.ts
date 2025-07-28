@@ -15,27 +15,23 @@ const send = (status: number, data: any): Response =>
         headers: JSONCONTENT_TYPE,
     });
 
-const target = new TextEncoder().encode('"correlationId":"');
-const decoder = new TextDecoder();
-
-const extractCorrelationIdFromBuffer = (buf: Uint8Array): string => {
-    outer: for (let i = 0; i <= buf.length - target.length; i++) {
-        for (let j = 0; j < target.length; j++) {
-            if (buf[i + j] !== target[j]) continue outer;
-        }
-
-        const from = i + target.length;
-        const to = buf.indexOf(0x22, from);
-        return decoder.decode(buf.subarray(from, to));
+const getCorrelationId = (str: string) => {
+    const start = str.indexOf('"correlationId":"');
+    if (start !== -1) {
+        const from = start + 17; // length of '"correlationId":"'
+        const to = str.indexOf('"', from);
+        const correlationId = str.slice(from, to);
+        return correlationId;
     }
-
-    return "0";
 }
 
 const ACCEPTED = { status: 200 };
 
 (async () => {
-    const [subRedis, pubRedis] = await Promise.all([
+    const [subRedis, workerPubRedis, pubPaymentRedis, defaultPubRedis, fallbackPubRedis] = await Promise.all([
+        getRedis(),
+        getRedis(),
+        getRedis(),
         getRedis(),
         getRedis()
     ]);
@@ -61,95 +57,90 @@ const ACCEPTED = { status: 200 };
     };
 
     subscribeToRedisHealth(processors.default, subRedis);
-    setInterval(() => checkHealth(processors.default, pubRedis), 5000);
-    checkHealth(processors.default, pubRedis);
-    subRedis.subscribe(REDIS_PAID_DEFAULT_CHANNEL, payResult => {
-        const time = Number(payResult);
-        insertPayment(time, processors.default.summary);
+    setInterval(() => checkHealth(processors.default, defaultPubRedis), 5000);
+    checkHealth(processors.default, defaultPubRedis);
+    subRedis.subscribe(REDIS_PAID_DEFAULT_CHANNEL, REDIS_PAID_FALLBACK_CHANNEL, payResult => {
+        console.log(`Subscribed to ${REDIS_PAID_DEFAULT_CHANNEL}`);
+    });
+    subRedis.on("message", (channel, message) => {
+        if (channel === REDIS_PAID_DEFAULT_CHANNEL) {
+            const time = Number(message);
+            insertPayment(time, processors.default.summary);
+        }
 
-        return true;
+        if (channel === REDIS_PAID_FALLBACK_CHANNEL) {
+            const time = Number(message);
+            insertPayment(time, processors.fallback.summary);
+        }
     });
 
     subscribeToRedisHealth(processors.fallback, subRedis);
-    setInterval(() => checkHealth(processors.fallback, pubRedis), 5000);
-    checkHealth(processors.fallback, pubRedis);
-    subRedis.subscribe(REDIS_PAID_FALLBACK_CHANNEL, payResult => {
-        const time = Number(payResult);
-        insertPayment(time, processors.fallback.summary);
+    setInterval(() => checkHealth(processors.fallback, fallbackPubRedis), 5000);
+    checkHealth(processors.fallback, fallbackPubRedis);
 
-        return true;
-    });
-
-    for (let i = 0; i < 10; i++) {
-        startWorker(pubRedis, processors);
+    for (let i = 0; i < 30; i++) {
+        const listenRedis = await getRedis();
+        startWorker(workerPubRedis, listenRedis, processors);
     }
 
-    const payments: string[] = [];
+    await new Promise(resolve => setTimeout(resolve, 500));
 
-    (async () => {
-        while (true) {
-            let ids = payments.splice(0, 1000);
+    Bun.serve({
+        routes: {
+            '/payments': {
+                POST: async (req) => {
+                    const text = await req.text();
+                    pubPaymentRedis.lpush(REDIS_PAYMENTS_QUEUE, getCorrelationId(text) as string);
+                    return new Response(null, ACCEPTED);
+                }
+            },
+            '/payments-summary': {
+                GET: async (req) => {
+                    const parsed = new URL(req.url);
 
-            if (!ids.length) {
-                await new Promise(resolve => setTimeout(resolve, 250));
-                ids = payments.splice(0, 1000);
+                    const from = parsed.searchParams.get("from") || undefined;
+                    const to = parsed.searchParams.get("to") || undefined;
 
-                if (!ids.length) {
-                    await new Promise(resolve => setTimeout(resolve, 1000));
-                    continue;
+                    const fromScore = from ? new Date(from).getTime() : undefined;
+                    const toScore = to ? new Date(to).getTime() : undefined;
+
+                    const defaultLength = Number(getLength(processors.default.summary, fromScore, toScore));
+                    const fallbackLength = Number(getLength(processors.fallback.summary, fromScore, toScore));
+
+                    return send(200, {
+                        default: {
+                            totalRequests: defaultLength,
+                            totalAmount: Number((defaultLength * 19.90).toFixed(2)),
+                        },
+                        fallback: {
+                            totalRequests: fallbackLength,
+                            totalAmount: Number((fallbackLength * 19.90).toFixed(2)),
+                        }
+                    });
+                }
+            },
+            '/admin/purge-payments': {
+                POST: async (req) => {
+                    processors.default.summary = [];
+                    processors.fallback.summary = [];
+                    return send(200, {
+                        message: "All payments purged."
+                    });
                 }
             }
-
-            await pubRedis.lPush(REDIS_PAYMENTS_QUEUE, ids);
-        }
-    })();
-
-    setTimeout(() => Bun.serve({
+        },
+        error(error) {
+            return new Response(`Internal Error: ${error.message}`, {
+                status: 500,
+                headers: {
+                    "Content-Type": "text/plain",
+                },
+            });
+        },
         port: 3000,
-        async fetch(req) {
-            const { method, url } = req;
-
-            if (method === "GET" && url.includes("/payments-summary")) {
-                const parsed = new URL(url);
-
-                const from = parsed.searchParams.get("from") || undefined;
-                const to = parsed.searchParams.get("to") || undefined;
-
-                const fromScore = from ? new Date(from).getTime() : undefined;
-                const toScore = to ? new Date(to).getTime() : undefined;
-
-                const defaultLength = Number(getLength(processors.default.summary, fromScore, toScore));
-                const fallbackLength = Number(getLength(processors.fallback.summary, fromScore, toScore));
-
-                return send(200, {
-                    default: {
-                        totalRequests: defaultLength,
-                        totalAmount: Number((defaultLength * 19.90).toFixed(2)),
-                    },
-                    fallback: {
-                        totalRequests: fallbackLength,
-                        totalAmount: Number((fallbackLength * 19.90).toFixed(2)),
-                    }
-                });
-            }
-
-            if (method === "POST" && url === "/admin/purge-payments") {
-                processors.default.summary = [];
-                processors.fallback.summary = [];
-
-                return send(200, {
-                    message: "All payments purged."
-                });
-            }
-
-            if (method === "POST" && url.includes("/payments")) {
-                const bodyBuffer = await req.arrayBuffer();
-                const id = extractCorrelationIdFromBuffer(new Uint8Array(bodyBuffer));
-                payments.push(id);
-                return new Response(null, ACCEPTED);
-            }
-
-            return send(404, { error: "Not Found" });
-        }
-    }), 500);
+        fetch(req) {
+            return new Response("Not Found", { status: 404 });
+        },
+    });
+    console.log("Server is running on http://localhost:3000");
 })();

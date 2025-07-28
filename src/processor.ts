@@ -27,23 +27,33 @@ export const checkHealth = async (processor: ProcessorState, pubRedis: RedisInst
     processor.minResponseTime = minResponseTime;
 }));
 
-export const subscribeToRedisHealth = (processor: ProcessorState, subRedis: RedisInstance) => subRedis.subscribe(processor.healthChannel, (message: string) => {
-    const [failing, minResponseTime] = message.split(':');
+export const subscribeToRedisHealth = (processor: ProcessorState, subRedis: RedisInstance) => {
+    subRedis.subscribe(processor.healthChannel, () => {
+        console.log(`Subscribed to ${processor.healthChannel}`);
+    });
 
-    processor.failing = failing === '1';
-    processor.minResponseTime = Number(minResponseTime);
-});
+    subRedis.on("message", (channel, message) => {
+        if (channel !== processor.healthChannel) {
+            return;
+        }
 
-export const decideProcessor = (attempt = 0, attempts = 30, processors: Processors) => {
+        const [failing, minResponseTime] = message.split(':');
+
+        processor.failing = failing === '1';
+        processor.minResponseTime = Number(minResponseTime);
+    });
+}
+
+export const decideProcessor = (attempt = 0, attempts = 10, processors: Processors) => {
+    if (attempt > attempts - 1) {
+        return processors.fallback;
+    }
+
     if (processors.default.failing && processors.fallback.failing) {
         return processors.default;
     }
 
     if (processors.default.minResponseTime <= processors.fallback.minResponseTime) {
-        return processors.default;
-    }
-
-    if (attempt < attempts - 1) {
         return processors.default;
     }
 
@@ -83,8 +93,6 @@ export const pay = async (payment: Payment, attempts = 20, processors: Processor
         if (result.ok || i >= attempts) {
             return result;
         };
-
-        await new Promise(resolve => setTimeout(resolve, 200));
     }
 
     return tryToPay(payment, attempts, attempts, requestedAtISO, requestedAtTime, processors);
