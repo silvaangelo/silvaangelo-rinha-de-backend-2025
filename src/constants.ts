@@ -15,6 +15,8 @@ export const PROCESSOR_FALLBACK_HEALTH_URL =
 
 export const JSONCONTENT_TYPE = { "Content-Type": "application/json" };
 
+export const WORKER_INSTANCE = process.env.WORKER_INSTANCE === "worker_instance";
+
 export type Processors = {
     default: ProcessorState;
     fallback: ProcessorState;
@@ -27,5 +29,6 @@ export type ProcessorState = {
     healthcheckUrl: string;
     processor: 'default' | 'fallback';
     healthChannel: string;
+    paidChannel: string;
     summary: number[];
 };

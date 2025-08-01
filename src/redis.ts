@@ -14,8 +14,6 @@ export const getRedis = async () => {
 export type RedisInstance = Awaited<ReturnType<typeof getRedis>>;
 
 export const REDIS_PAYMENTS_QUEUE = "payments:queue";
-export const REDIS_PAID_DEFAULT_CHANNEL = "paid:default";
-export const REDIS_PAID_FALLBACK_CHANNEL = "paid:fallback";
 
 export const popPaymentJob = async (
     redis: RedisInstance

@@ -28,7 +28,9 @@ services:
           memory: "70MB"
 
   api01: &api
-    image: silvaangelolambda/rinha-api-2025:20250731
+    build:
+      context: .
+      dockerfile: ./Dockerfile-bun
     command: >
       bun --optimize-for-size /api/index.js
     environment:
@@ -46,11 +48,19 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.525"
-          memory: "125MB"
+          cpus: "0.3"
+          memory: "90MB"
 
   api02:
     <<: *api
+
+  worker01:
+    <<: *api
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - PROCESSOR_DEFAULT_URL=http://payment-processor-default:8080
+      - PROCESSOR_FALLBACK_URL=http://payment-processor-fallback:8080
+      - WORKER_INSTANCE=worker_instance
 
   haproxy:
     image: haproxy:2.9-alpine
@@ -64,10 +74,11 @@ services:
     depends_on:
       - api01
       - api02
+      - api03
     deploy:
       resources:
         limits:
-          cpus: "0.2"
+          cpus: "0.3"
           memory: "30MB"
 
 networks:
