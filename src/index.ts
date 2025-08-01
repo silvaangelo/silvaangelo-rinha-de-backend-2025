@@ -6,6 +6,7 @@ import {
     REDIS_PAYMENTS_QUEUE
 } from "./redis";
 import { startWorker } from "./worker";
+import { chmodSync, existsSync, unlinkSync } from "node:fs";
 
 const send = (status: number, data: any): Response =>
     new Response(JSON.stringify(data), {
@@ -13,10 +14,12 @@ const send = (status: number, data: any): Response =>
         headers: JSONCONTENT_TYPE,
     });
 
+const textDecoder = new TextDecoder();
+
 const getCorrelationIdFromBuffer = (buffer: Uint8Array): string | undefined => {
     const needle = '"correlationId":"';
     const needleLength = needle.length;
-    const text = new TextDecoder().decode(buffer); // Avoid if possible; can optimize further
+    const text = textDecoder.decode(buffer);
     const start = text.indexOf(needle);
 
     if (start === -1) return;
@@ -25,6 +28,27 @@ const getCorrelationIdFromBuffer = (buffer: Uint8Array): string | undefined => {
     if (to === -1) return;
     return text.slice(from, to);
 };
+
+let socketPath = '';
+
+if (process.env.API_INSTANCE === 'api01') {
+    socketPath = '/var/run/rinha-api01/rinha.sock';
+}
+if (process.env.API_INSTANCE === 'api02') {
+    socketPath = '/var/run/rinha-api02/rinha.sock';
+}
+
+if (existsSync(socketPath)) {
+    try {
+        unlinkSync(socketPath);
+    } catch (err) {
+        console.error("Failed to unlink socket:", err);
+    }
+}
+
+try {
+    unlinkSync(socketPath);
+} catch (_) { }
 
 (async () => {
     const processors = {
@@ -109,9 +133,9 @@ const getCorrelationIdFromBuffer = (buffer: Uint8Array): string | undefined => {
 
         let API_READY = false;
 
-        const redis = await getRedis();
+        const workerReadyRedis = await getRedis();
 
-        redis.subscribe('workers:ready', () => {
+        workerReadyRedis.subscribe('workers:ready', () => {
             console.log("Subscribed to workers:ready");
             API_READY = true;
         });
@@ -119,69 +143,60 @@ const getCorrelationIdFromBuffer = (buffer: Uint8Array): string | undefined => {
         while (!API_READY) {
             await new Promise(resolve => setTimeout(resolve, 200));
         }
+        workerReadyRedis.unsubscribe('workers:ready');
 
         Bun.serve({
-            routes: {
-                '/payments': {
-                    POST: async (req) => {
-                        const buffer = await req.arrayBuffer();
-                        payments.push(buffer);
-                        return new Response(null, { status: 201 });
-                    }
-                },
-                '/payments-summary': {
-                    GET: async (req) => {
-                        const fromIndex = req.url.indexOf('from=') + 5;
-                        const toIndex = req.url.indexOf('&to=');
-                        const fromDate = req.url.slice(fromIndex, toIndex);
-                        const toDate = req.url.slice(toIndex + 4);
-
-                        const from = fromDate || undefined;
-                        const to = toDate || undefined;
-
-                        const fromScore = from ? new Date(from).getTime() : undefined;
-                        const toScore = to ? new Date(to).getTime() : undefined;
-
-                        const [defaultLength, fallbackLength] = [
-                            getLength(processors.default.summary, fromScore, toScore),
-                            getLength(processors.fallback.summary, fromScore, toScore)
-                        ];
-
-                        return send(200, {
-                            default: {
-                                totalRequests: defaultLength,
-                                totalAmount: Number((defaultLength * 19.90).toFixed(2)),
-                            },
-                            fallback: {
-                                totalRequests: fallbackLength,
-                                totalAmount: Number((fallbackLength * 19.90).toFixed(2)),
-                            }
-                        });
-                    }
-                },
-                '/admin/purge-payments': {
-                    POST: async (_req) => {
-                        processors.default.summary = [];
-                        processors.fallback.summary = [];
-                        return send(200, {
-                            message: "All payments purged."
-                        });
-                    }
+            unix: socketPath,
+            fetch: async (req) => {
+                if (req.method === 'POST' && req.url.includes('/payments')) {
+                    const buffer = await req.arrayBuffer();
+                    payments.push(buffer);
+                    return new Response(null, { status: 201 });
                 }
-            },
-            error(error) {
-                return new Response(`Internal Error: ${error.message}`, {
-                    status: 500,
-                    headers: {
-                        "Content-Type": "text/plain",
-                    },
+
+                if (req.method === 'GET' && req.url.includes('/payments-summary')) {
+                    const fromIndex = req.url.indexOf('from=') + 5;
+                    const toIndex = req.url.indexOf('&to=');
+                    const fromDate = req.url.slice(fromIndex, toIndex);
+                    const toDate = req.url.slice(toIndex + 4);
+
+                    const from = fromDate || undefined;
+                    const to = toDate || undefined;
+
+                    const fromScore = from ? new Date(from).getTime() : undefined;
+                    const toScore = to ? new Date(to).getTime() : undefined;
+
+                    const [defaultLength, fallbackLength] = [
+                        getLength(processors.default.summary, fromScore, toScore),
+                        getLength(processors.fallback.summary, fromScore, toScore)
+                    ];
+
+                    return send(200, {
+                        default: {
+                            totalRequests: defaultLength,
+                            totalAmount: Number((defaultLength * 19.90).toFixed(2)),
+                        },
+                        fallback: {
+                            totalRequests: fallbackLength,
+                            totalAmount: Number((fallbackLength * 19.90).toFixed(2)),
+                        }
+                    });
+                }
+
+                if (req.method === 'POST' && req.url.includes('/admin/purge-payments')) {
+                    processors.default.summary = [];
+                    processors.fallback.summary = [];
+                    return send(200, {
+                        message: "All payments purged."
+                    });
+                }
+
+                return send(404, {
+                    message: "Not Found"
                 });
-            },
-            port: 3000,
-            fetch(req) {
-                return new Response("Not Found", { status: 404 });
-            },
+            }
         });
         console.log("Server is running on http://localhost:3000");
+        chmodSync(socketPath, 0o777);
     }
 })();
