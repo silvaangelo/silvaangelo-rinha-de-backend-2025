@@ -28,7 +28,7 @@ const getCorrelationId = (str: string) => {
 const ACCEPTED = { status: 200 };
 
 (async () => {
-    const [subRedis, workerPubRedis, pubPaymentRedis, defaultPubRedis, fallbackPubRedis] = await Promise.all([
+    const [subscribeToPaidRedis, workerPubRedis, pubPaymentRedis, defaultPubRedis, fallbackPubRedis] = await Promise.all([
         getRedis(),
         getRedis(),
         getRedis(),
@@ -56,32 +56,45 @@ const ACCEPTED = { status: 200 };
         } as ProcessorState
     };
 
-    subscribeToRedisHealth(processors.default, subRedis);
+    await Promise.all([
+        subscribeToRedisHealth(processors.default),
+        subscribeToRedisHealth(processors.fallback),
+    ]);
+
     setInterval(() => checkHealth(processors.default, defaultPubRedis), 5000);
-    checkHealth(processors.default, defaultPubRedis);
-    subRedis.subscribe(REDIS_PAID_DEFAULT_CHANNEL, REDIS_PAID_FALLBACK_CHANNEL, payResult => {
-        console.log(`Subscribed to ${REDIS_PAID_DEFAULT_CHANNEL}`);
-    });
-    subRedis.on("message", (channel, message) => {
-        if (channel === REDIS_PAID_DEFAULT_CHANNEL) {
-            const time = Number(message);
-            insertPayment(time, processors.default.summary);
-        }
-
-        if (channel === REDIS_PAID_FALLBACK_CHANNEL) {
-            const time = Number(message);
-            insertPayment(time, processors.fallback.summary);
-        }
-    });
-
-    subscribeToRedisHealth(processors.fallback, subRedis);
     setInterval(() => checkHealth(processors.fallback, fallbackPubRedis), 5000);
+
+    checkHealth(processors.default, defaultPubRedis);
     checkHealth(processors.fallback, fallbackPubRedis);
 
-    for (let i = 0; i < 30; i++) {
-        const listenRedis = await getRedis();
-        startWorker(workerPubRedis, listenRedis, processors);
+    subscribeToPaidRedis.subscribe(REDIS_PAID_DEFAULT_CHANNEL, REDIS_PAID_FALLBACK_CHANNEL, _ => {
+        console.log(`Subscribed to paid channels`);
+    });
+    subscribeToPaidRedis.on("message", (channel, message) => {
+        const time = Number(message);
+        const isDefault = channel === REDIS_PAID_DEFAULT_CHANNEL;
+
+        insertPayment(time, isDefault ? processors.default.summary : processors.fallback.summary);
+    });
+
+    for (let i = 0; i < 100; i++) {
+        startWorker(workerPubRedis, processors);
     }
+
+    const payments: string[] = [];
+
+    (async () => {
+        while (true) {
+            const toPush = payments.splice(0, 1000).map((input) => getCorrelationId(input)).filter(Boolean);
+
+            if (!toPush.length) {
+                await new Promise(resolve => setTimeout(resolve, 500));
+                continue;
+            }
+
+            await pubPaymentRedis.lpush(REDIS_PAYMENTS_QUEUE, ...toPush as string[]);
+        }
+    })();
 
     await new Promise(resolve => setTimeout(resolve, 500));
 
@@ -90,7 +103,7 @@ const ACCEPTED = { status: 200 };
             '/payments': {
                 POST: async (req) => {
                     const text = await req.text();
-                    pubPaymentRedis.lpush(REDIS_PAYMENTS_QUEUE, getCorrelationId(text) as string);
+                    payments.push(text);
                     return new Response(null, ACCEPTED);
                 }
             },

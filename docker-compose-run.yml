@@ -1,7 +1,12 @@
 services:
   redis:
-    image: redis:7.2-alpine
+    build:
+      context: .
+      dockerfile: ./redis/Dockerfile
     hostname: redis
+    volumes:
+      - ./redis/redis.conf:/usr/local/etc/redis/redis.conf
+      - redis-socket:/var/run/redis
     command: >
       redis-server
       --save ""
@@ -12,7 +17,7 @@ services:
       - rinha-net
       - payment-processor
     healthcheck:
-      test: ["CMD-SHELL", "redis-cli -h 127.0.0.1 ping || exit 1"]
+      test: ["CMD-SHELL", "redis-cli", "-s", "/var/run/redis/redis.sock", "ping"]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -23,13 +28,15 @@ services:
           memory: "70MB"
 
   api01: &api
-    image: silvaangelolambda/rinha-api-2025:20250727
+    image: silvaangelolambda/rinha-api-2025:20250731
     command: >
       bun --optimize-for-size /api/index.js
     environment:
       - REDIS_URL=redis://redis:6379
       - PROCESSOR_DEFAULT_URL=http://payment-processor-default:8080
       - PROCESSOR_FALLBACK_URL=http://payment-processor-fallback:8080
+    volumes:
+      - redis-socket:/var/run/redis
     networks:
       - payment-processor
       - rinha-net
@@ -45,10 +52,10 @@ services:
   api02:
     <<: *api
 
-  nginx:
-    image: nginx:1.27.0-alpine
+  haproxy:
+    image: haproxy:2.9-alpine
     volumes:
-      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
     ports:
       - "9999:9999"
     networks:
@@ -68,3 +75,6 @@ networks:
     external: true
   rinha-net:
     driver: bridge
+
+volumes:
+  redis-socket:

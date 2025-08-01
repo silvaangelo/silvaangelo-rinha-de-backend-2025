@@ -2,8 +2,7 @@ import Redis from "ioredis";
 
 export const getRedis = async () => {
     const client = new Redis({
-        host: 'redis',
-        port: 6379,
+        path: '/var/run/redis/redis.sock',
         lazyConnect: true,
     });
 
